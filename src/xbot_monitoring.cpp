@@ -46,6 +46,8 @@ std::mutex mqtt_callback_mutex;
 ros::Publisher cmd_vel_pub;
 ros::Publisher action_pub;
 
+geometry_msgs::Twist last_cmd_vel;
+
 class MqttCallback : public mqtt::callback {
     void connected(const mqtt::string &string) override {
         ROS_INFO_STREAM("MQTT Connected");
@@ -279,6 +281,8 @@ void robot_state_callback(const xbot_msgs::RobotState::ConstPtr &msg) {
     j["pose"]["pos_accuracy"] = msg->robot_pose.position_accuracy;
     j["pose"]["heading_accuracy"] = msg->robot_pose.orientation_accuracy;
     j["pose"]["heading_valid"] = msg->robot_pose.orientation_valid;
+    j["cmd_vel"]["x"] = last_cmd_vel.linear.x;
+    j["cmd_vel"]["rz"] = last_cmd_vel.angular.z;
 
     try_publish("robot_state/json", j.dump());
     json data;
@@ -442,6 +446,10 @@ void map_overlay_callback(const xbot_msgs::MapOverlay::ConstPtr &msg) {
     publish_map_overlay();
 }
 
+void cmd_vel_callback(const geometry_msgs::Twist::ConstPtr &msg) {
+    last_cmd_vel = *msg;
+}
+
 
 bool registerActions(xbot_msgs::RegisterActionsSrvRequest &req, xbot_msgs::RegisterActionsSrvResponse &res) {
 
@@ -470,6 +478,7 @@ int main(int argc, char **argv) {
 
     ros::Subscriber robotStateSubscriber = n->subscribe("xbot_monitoring/robot_state", 10, robot_state_callback);
     ros::Subscriber mapSubscriber = n->subscribe("xbot_monitoring/map", 10, map_callback);
+    ros::Subscriber cmdVelSubscriber = n->subscribe("cmd_vel", 10, cmd_vel_callback);
     ros::Subscriber mapOverlaySubscriber = n->subscribe("xbot_monitoring/map_overlay", 10, map_overlay_callback);
 
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
