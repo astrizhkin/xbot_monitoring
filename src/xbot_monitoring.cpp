@@ -20,6 +20,8 @@
 #include "xbot_msgs/ActionInfo.h"
 #include "xbot_msgs/MapOverlay.h"
 
+#define SEND_VEL_COMD
+
 using json = nlohmann::json;
 
 void publish_sensor_metadata();
@@ -47,6 +49,11 @@ std::mutex mqtt_callback_mutex;
 ros::Publisher cmd_vel_pub;
 ros::Publisher action_pub;
 
+
+#ifdef SEND_VEL_COMD
+geometry_msgs::Twist last_cmd_vel;
+#endif
+
 // properties for external mqtt
 bool external_mqtt_enable = false;
 std::string external_mqtt_username = "";
@@ -59,7 +66,7 @@ class MqttCallback : public mqtt::callback {
 
 
     void connected(const mqtt::string &string) override {
-        ROS_INFO_STREAM("MQTT Connected");
+        ROS_INFO_STREAM("[xbot_monitoring] MQTT Connected");
         publish_sensor_metadata();
         publish_map();
         publish_map_overlay();
@@ -84,10 +91,10 @@ public:
                 t.angular.z = json["vz"];
                 cmd_vel_pub.publish(t);
             } catch (const json::exception &e) {
-                ROS_ERROR_STREAM("Error decoding /teleop bson: " << e.what());
+                ROS_ERROR_STREAM("[xbot_monitoring] Error decoding /teleop bson: " << e.what());
             }
         } else if(ptr->get_topic() == "/action") {
-            ROS_INFO_STREAM("Got action: " + ptr->get_payload());
+            ROS_INFO_STREAM("[xbot_monitoring] Got action: " + ptr->get_payload());
             std_msgs::String action_msg;
             action_msg.data = ptr->get_payload_str();
             action_pub.publish(action_msg);
@@ -130,7 +137,7 @@ void setupMqttClient() {
             client_->connect(connect_options_);
 
         } catch (const mqtt::exception &e) {
-            ROS_ERROR("Client could not be initialized: %s", e.what());
+            ROS_ERROR("[xbot_monitoring] Client could not be initialized: %s", e.what());
             exit(EXIT_FAILURE);
         }
     }
@@ -163,7 +170,7 @@ void setupMqttClient() {
             client_external_->connect(connect_options_);
 
         } catch (const mqtt::exception &e) {
-            ROS_ERROR("External Client could not be initialized: %s", e.what());
+            ROS_ERROR("[xbot_monitoring] External Client could not be initialized: %s", e.what());
             exit(EXIT_FAILURE);
         }
     }
@@ -287,7 +294,7 @@ void publish_sensor_metadata() {
 void subscribe_to_sensor(std::string topic) {
     auto &sensor = found_sensors[topic];
 
-    ROS_INFO_STREAM("Subscribing to sensor data for sensor with name: " << sensor.sensor_name);
+    ROS_INFO_STREAM("[xbot_monitoring] Subscribing to sensor data for sensor with name: " << sensor.sensor_name);
 
     std::string data_topic = "xbot_monitoring/sensors/" + sensor.sensor_id + "/data";
 
@@ -319,7 +326,7 @@ void subscribe_to_sensor(std::string topic) {
             break;
         }
         default: {
-            ROS_ERROR_STREAM("Inavlid Sensor Data Type: " << (int) sensor.value_type);
+            ROS_ERROR_STREAM("[xbot_monitoring] Inavlid Sensor Data Type: " << (int) sensor.value_type);
         }
     }
 }
@@ -341,6 +348,10 @@ void robot_state_callback(const xbot_msgs::RobotState::ConstPtr &msg) {
     j["pose"]["pos_accuracy"] = msg->robot_pose.position_accuracy;
     j["pose"]["heading_accuracy"] = msg->robot_pose.orientation_accuracy;
     j["pose"]["heading_valid"] = msg->robot_pose.orientation_valid;
+#ifdef SEND_VEL_COMD
+    j["cmd_vel"]["x"] = last_cmd_vel.linear.x;
+    j["cmd_vel"]["rz"] = last_cmd_vel.angular.z;
+#endif
 
     try_publish("robot_state/json", j.dump());
     json data;
@@ -348,6 +359,12 @@ void robot_state_callback(const xbot_msgs::RobotState::ConstPtr &msg) {
     auto bson = json::to_bson(data);
     try_publish_binary("robot_state/bson", bson.data(), bson.size());
 }
+
+#ifdef SEND_VEL_COMD
+void cmd_vel_callback(const geometry_msgs::Twist::ConstPtr &msg) {
+    last_cmd_vel = *msg;
+}
+#endif
 
 void publish_actions() {
     json actions = json::array();
@@ -507,7 +524,7 @@ void map_overlay_callback(const xbot_msgs::MapOverlay::ConstPtr &msg) {
 
 bool registerActions(xbot_msgs::RegisterActionsSrvRequest &req, xbot_msgs::RegisterActionsSrvResponse &res) {
 
-    ROS_INFO_STREAM("new actions registered: " << req.node_prefix << " registered " << req.actions.size() << " actions.");
+    ROS_INFO_STREAM("[xbot_monitoring] new actions registered: " << req.node_prefix << " registered " << req.actions.size() << " actions.");
 
     registered_actions[req.node_prefix] = req.actions;
 
@@ -537,7 +554,7 @@ int main(int argc, char **argv) {
     external_mqtt_password = paramNh.param("external_mqtt_password", std::string(""));
 
     if(external_mqtt_enable) {
-        ROS_INFO_STREAM("Using extnernal MQTT broker: " << external_mqtt_hostname << ":" << external_mqtt_port << " with topic prefix: " + external_mqtt_topic_prefix);
+        ROS_INFO_STREAM("[xbot_monitoring] Using extnernal MQTT broker: " << external_mqtt_hostname << ":" << external_mqtt_port << " with topic prefix: " + external_mqtt_topic_prefix);
     }
 
     // First setup MQTT
@@ -547,6 +564,9 @@ int main(int argc, char **argv) {
 
     ros::Subscriber robotStateSubscriber = n->subscribe("xbot_monitoring/robot_state", 10, robot_state_callback);
     ros::Subscriber mapSubscriber = n->subscribe("xbot_monitoring/map", 10, map_callback);
+#ifdef SEND_VEL_COMD
+    ros::Subscriber cmdVelSubscriber = n->subscribe("cmd_vel", 10, cmd_vel_callback);
+#endif
     ros::Subscriber mapOverlaySubscriber = n->subscribe("xbot_monitoring/map_overlay", 10, map_overlay_callback);
 
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
@@ -567,12 +587,12 @@ int main(int argc, char **argv) {
         std::for_each(topics.begin(), topics.end(), [&](const ros::master::TopicInfo &item) {
             if (boost::regex_match(item.name, topic_regex)) {
                 if (active_subscribers.count(item.name) == 0 && found_sensors.count(item.name) == 0) {
-                    ROS_INFO_STREAM("found new sensor topic " << item.name);
+                    ROS_INFO_STREAM("[xbot_monitoring] found new sensor topic " << item.name);
                     active_subscribers[item.name] = n->subscribe<xbot_msgs::SensorInfo>(item.name, 1,
                                                                                         [topic = item.name](
                                                                                                 const xbot_msgs::SensorInfo::ConstPtr &msg) {
                                                                                             ROS_INFO_STREAM(
-                                                                                                    "got sensor info for sensor on topic "
+                                                                                                    "[xbot_monitoring] got sensor info for sensor on topic "
                                                                                                             << msg->sensor_name
                                                                                                             << " on topic "
                                                                                                             << topic);
