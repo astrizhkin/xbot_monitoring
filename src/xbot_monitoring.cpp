@@ -20,7 +20,7 @@
 #include "xbot_msgs/ActionInfo.h"
 #include "xbot_msgs/MapOverlay.h"
 
-#define SEND_VEL_COMD
+//#define SEND_VEL_COMD
 
 using json = nlohmann::json;
 
