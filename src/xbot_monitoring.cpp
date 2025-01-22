@@ -420,10 +420,11 @@ void map_callback(const xbot_msgs::Map::ConstPtr &msg) {
     j["meta"]["mapCenterY"] = msg->mapCenterY;
 
 
-    json working_areas_j;
-    for(const auto &area : msg->workingArea) {
+    json areas_j;
+    for(const auto &area : msg->areas) {
         json area_j;
         area_j["name"] = area.name;
+        area_j["area_type"] = area.area_type;
         {
             json outline_poly_j;
             for (const auto &pt: area.area.points) {
@@ -434,53 +435,10 @@ void map_callback(const xbot_msgs::Map::ConstPtr &msg) {
             }
             area_j["outline"] = outline_poly_j;
         }
-        json obstacle_polys_j;
-        for(const auto &obstacle : area.obstacles) {
-            json obstacle_poly_j;
-            for(const auto &pt : obstacle.points) {
-                json p_j;
-                p_j["x"] = pt.x;
-                p_j["y"] = pt.y;
-                obstacle_poly_j.push_back(p_j);
-            }
-            obstacle_polys_j.push_back(obstacle_poly_j);
-        }
-        area_j["obstacles"] = obstacle_polys_j;
-        working_areas_j.push_back(area_j);
-    }
-    json navigation_areas_j;
-
-    for(const auto &area : msg->navigationAreas) {
-        json area_j;
-        area_j["name"] = area.name;
-        {
-            json outline_poly_j;
-            for (const auto &pt: area.area.points) {
-                json p_j;
-                p_j["x"] = pt.x;
-                p_j["y"] = pt.y;
-                outline_poly_j.push_back(p_j);
-            }
-            area_j["outline"] = outline_poly_j;
-        }
-        json obstacle_polys_j;
-        for(const auto &obstacle : area.obstacles) {
-            json obstacle_poly_j;
-            for(const auto &pt : obstacle.points) {
-                json p_j;
-                p_j["x"] = pt.x;
-                p_j["y"] = pt.y;
-                obstacle_poly_j.push_back(p_j);
-            }
-            obstacle_polys_j.push_back(obstacle_poly_j);
-        }
-        area_j["obstacles"] = obstacle_polys_j;
-        navigation_areas_j.push_back(area_j);
+        areas_j.push_back(area_j);
     }
 
-    j["working_areas"] = working_areas_j;
-    j["navigation_areas"] = navigation_areas_j;
-
+    j["areas"] = areas_j;
 
     map = j;
     has_map = true;
