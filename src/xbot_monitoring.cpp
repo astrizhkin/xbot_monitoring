@@ -28,6 +28,7 @@ void publish_sensor_metadata();
 void publish_map();
 void publish_map_overlay();
 void publish_actions();
+void publish_version();
 
 // Stores registered actions (prefix to vector<action>)
 std::map<std::string, std::vector<xbot_msgs::ActionInfo>> registered_actions;
@@ -61,9 +62,9 @@ std::string external_mqtt_password = "";
 std::string external_mqtt_hostname = "";
 std::string external_mqtt_topic_prefix = "";
 std::string external_mqtt_port = "";
+std::string version_string = "";
 
 class MqttCallback : public mqtt::callback {
-
 
     void connected(const mqtt::string &string) override {
         ROS_INFO_STREAM("[xbot_monitoring] MQTT Connected");
@@ -71,19 +72,27 @@ class MqttCallback : public mqtt::callback {
         publish_map();
         publish_map_overlay();
         publish_actions();
+        publish_version();
 
+        // BEGIN: Deprecated code (1/2)
+        // Earlier implementations subscribed to "/action" and "prefix//action" topics, we do it to not break stuff as well.
+        client_->subscribe(this->mqtt_topic_prefix + "/teleop", 0);
+        client_->subscribe(this->mqtt_topic_prefix + "/command", 0);
+        client_->subscribe(this->mqtt_topic_prefix + "/action", 0);
+        // END: Deprecated code (1/2)
 
-        client_->subscribe("/teleop", 0);
-        client_->subscribe("/command", 0);
-        client_->subscribe("/action", 0);
+        client_->subscribe(this->mqtt_topic_prefix + "teleop", 0);
+        client_->subscribe(this->mqtt_topic_prefix + "command", 0);
+        client_->subscribe(this->mqtt_topic_prefix + "action", 0);
     }
 
 public:
-    void setMqttClient(std::shared_ptr<mqtt::async_client> c) {
+    void setMqttClient(std::shared_ptr<mqtt::async_client> c, const std::string &mqtt_topic_prefix) {
         this->client_ = std::move(c);
+        this->mqtt_topic_prefix = mqtt_topic_prefix;
     }
     void message_arrived(mqtt::const_message_ptr ptr) override {
-        if(ptr->get_topic() == "/teleop") {
+        if(ptr->get_topic() == this->mqtt_topic_prefix + "teleop") {
             try {
                 json json = json::from_bson(ptr->get_payload().begin(), ptr->get_payload().end());
                 geometry_msgs::Twist t;
@@ -93,15 +102,23 @@ public:
             } catch (const json::exception &e) {
                 ROS_ERROR_STREAM("[xbot_monitoring] Error decoding /teleop bson: " << e.what());
             }
-        } else if(ptr->get_topic() == "/action") {
+        } else if(ptr->get_topic() == this->mqtt_topic_prefix + "action") {
             ROS_INFO_STREAM("[xbot_monitoring] Got action: " + ptr->get_payload());
             std_msgs::String action_msg;
             action_msg.data = ptr->get_payload_str();
             action_pub.publish(action_msg);
+        } else if(ptr->get_topic() == this->mqtt_topic_prefix + "/action") {
+            // BEGIN: Deprecated code (2/2)
+            ROS_WARN_STREAM("Got action on deprecated topic! Change your topic names!: " + ptr->get_payload());
+            std_msgs::String action_msg;
+            action_msg.data = ptr->get_payload_str();
+            action_pub.publish(action_msg);
+            // END: Deprecated code (2/2)
         }
     }
 private:
     std::shared_ptr<mqtt::async_client> client_;
+    std::string mqtt_topic_prefix = "";
 };
 
 MqttCallback mqtt_callback;
@@ -131,7 +148,7 @@ void setupMqttClient() {
         try {
             client_ = std::make_shared<mqtt::async_client>(
                     uri, "xbot_monitoring");
-            mqtt_callback.setMqttClient(client_);
+            mqtt_callback.setMqttClient(client_, "");
             client_->set_callback(mqtt_callback);
 
             client_->connect(connect_options_);
@@ -163,8 +180,8 @@ void setupMqttClient() {
 
         try {
             client_external_ = std::make_shared<mqtt::async_client>(
-                    uri, "xbot_monitoring");
-            mqtt_callback_external.setMqttClient(client_external_);
+                    uri, "ext_xbot_monitoring");
+            mqtt_callback_external.setMqttClient(client_external_, external_mqtt_topic_prefix);
             client_external_->set_callback(mqtt_callback_external);
 
             client_external_->connect(connect_options_);
@@ -201,6 +218,7 @@ void try_publish(std::string topic, std::string data, bool retain = false) {
         }
     }
 }
+
 void try_publish_binary(std::string topic, const void *data, size_t size, bool retain = false) {
     try {
         if (retain) {
@@ -212,6 +230,15 @@ void try_publish_binary(std::string topic, const void *data, size_t size, bool r
     } catch (const mqtt::exception &e) {
         // client disconnected or something, we drop it.
     }
+}
+
+void publish_version() {
+    json version = {
+            {"version", version_string}
+    };
+    try_publish("version", version.dump(), true);
+    auto bson = json::to_bson(version);
+    try_publish_binary("version", bson.data(), bson.size(), true);
 }
 
 void publish_sensor_metadata() {
@@ -266,6 +293,10 @@ void publish_sensor_metadata() {
             }
             case xbot_msgs::SensorInfo::VALUE_DESCRIPTION_PERCENT: {
                 info["value_description"] = "PERCENT";
+                break;
+            }
+            case xbot_msgs::SensorInfo::VALUE_DESCRIPTION_RPM: {
+                info["value_description"] = "REVOLUTIONS";
                 break;
             }
             default: {
@@ -340,6 +371,9 @@ void robot_state_callback(const xbot_msgs::RobotState::ConstPtr &msg) {
     j["current_action_progress"] = msg->current_action_progress;
     j["current_state"] = msg->current_state;
     j["current_sub_state"] = msg->current_sub_state;
+    j["current_area"] = msg->current_area;
+    j["current_path"] = msg->current_path;
+    j["current_path_index"] = msg->current_path_index;
     j["emergency"] = msg->emergency;
     j["is_charging"] = msg->is_charging;
     j["pose"]["x"] = msg->robot_pose.pose.pose.position.x;
@@ -499,6 +533,11 @@ int main(int argc, char **argv) {
     n = new ros::NodeHandle();
     ros::NodeHandle paramNh("~");
 
+    version_string = paramNh.param("software_version", std::string("UNKNOWN VERSION"));
+    if(version_string.empty()) {
+        version_string = "UNKNOWN VERSION";
+    }
+
     external_mqtt_enable = paramNh.param("external_mqtt_enable", false);
     external_mqtt_topic_prefix = paramNh.param("external_mqtt_topic_prefix", std::string(""));
     if(!external_mqtt_topic_prefix.empty() && external_mqtt_topic_prefix.back() != '/') {
@@ -543,35 +582,39 @@ int main(int argc, char **argv) {
         ros::master::V_TopicInfo topics;
         ros::master::getTopics(topics);
         std::for_each(topics.begin(), topics.end(), [&](const ros::master::TopicInfo &item) {
-            if (boost::regex_match(item.name, topic_regex)) {
-                if (active_subscribers.count(item.name) == 0 && found_sensors.count(item.name) == 0) {
-                    ROS_INFO_STREAM("[xbot_monitoring] found new sensor topic " << item.name);
-                    active_subscribers[item.name] = n->subscribe<xbot_msgs::SensorInfo>(item.name, 1,
-                                                                                        [topic = item.name](
-                                                                                                const xbot_msgs::SensorInfo::ConstPtr &msg) {
-                                                                                            ROS_INFO_STREAM(
-                                                                                                    "[xbot_monitoring] got sensor info for sensor on topic "
-                                                                                                            << msg->sensor_name
-                                                                                                            << " on topic "
-                                                                                                            << topic);
-                                                                                            {
-                                                                                                std::unique_lock<std::mutex> lk(
-                                                                                                        mqtt_callback_mutex);
+            
+            if (!boost::regex_match(item.name, topic_regex) || active_subscribers.count(item.name) != 0)
+                return;
 
-                                                                                                // Save the sensor info
-                                                                                                found_sensors[topic] = *msg;
-                                                                                            }
-                                                                                            // Stop subscribing to infos
-                                                                                            active_subscribers.erase(
-                                                                                                    topic);
-                                                                                            // Subscribe for data
-                                                                                            subscribe_to_sensor(
-                                                                                                    topic);
-                                                                                            // republish sensor info
-                                                                                            publish_sensor_metadata();
-                                                                                        });
+            ROS_INFO_STREAM("[xbot_monitoring] Found new sensor topic " << item.name);
+            active_subscribers[item.name] = n->subscribe<xbot_msgs::SensorInfo>(
+                item.name, 1, [topic = item.name](const xbot_msgs::SensorInfo::ConstPtr &msg) {
+                    ROS_INFO_STREAM("[xbot_monitoring] Got sensor info for sensor on topic " << msg->sensor_name << " on topic " << topic);
+                    auto exist = found_sensors.count(topic);
+
+                    // Sensor already known and sensor-info equals?
+                    if(exist != 0 && found_sensors[topic] == *msg)
+                        return;
+                    
+                    {
+                        // Sensor is new or sensor-info differ from the buffered one
+                        std::unique_lock<std::mutex> lk(mqtt_callback_mutex);
+                        found_sensors[topic] = *msg;  // Save the (new|changed) sensor info
+                    }
+
+                    // Let the info subscription alive for dynamic threshold changes
+                    //active_subscribers.erase(topic);  // Stop subscribing to infos
+
+                    if (exist == 0) {
+                        subscribe_to_sensor(topic);  // Subscribe for data
+                    }
+
+                    // Republish (new|changed) sensor info
+                    // NOTE: If a sensor name or id changes, the related data topic wouldn't change!
+                    //       But do we dynamically change a sensor name or id?
+                    publish_sensor_metadata();
                 }
-            }
+            );
         });
         sensor_check_rate.sleep();
     }
