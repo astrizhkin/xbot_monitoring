@@ -109,7 +109,7 @@ public:
             action_pub.publish(action_msg);
         } else if(ptr->get_topic() == this->mqtt_topic_prefix + "/action") {
             // BEGIN: Deprecated code (2/2)
-            ROS_WARN_STREAM("Got action on deprecated topic! Change your topic names!: " + ptr->get_payload());
+            ROS_WARN_STREAM("[xbot_monitoring] Got action on deprecated topic! Change your topic names!: " + ptr->get_payload());
             std_msgs::String action_msg;
             action_msg.data = ptr->get_payload_str();
             action_pub.publish(action_msg);
