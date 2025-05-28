@@ -50,20 +50,15 @@ include_directories(
 
 add_executable(xbot_monitoring
         src/xbot_monitoring.cpp)
-
-
 add_dependencies(xbot_monitoring ${catkin_EXPORTED_TARGETS} ${${PROJECT_NAME}_EXPORTED_TARGETS})
 target_link_libraries(xbot_monitoring ${catkin_LIBRARIES} ${PahoMqttCpp_LIBRARIES} nlohmann_json::nlohmann_json)
 
 add_executable(xbot_sensor_example
         src/xbot_sensor_example.cpp)
-
-
 add_dependencies(xbot_sensor_example ${catkin_EXPORTED_TARGETS} ${${PROJECT_NAME}_EXPORTED_TARGETS})
 target_link_libraries(xbot_sensor_example ${catkin_LIBRARIES})
+
 add_executable(heatmap_generator
         src/heatmap_generator.cpp)
-
-
 add_dependencies(heatmap_generator ${catkin_EXPORTED_TARGETS} ${${PROJECT_NAME}_EXPORTED_TARGETS})
 target_link_libraries(heatmap_generator ${catkin_LIBRARIES})
