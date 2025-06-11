@@ -12,13 +12,15 @@
 #include "xbot_msgs/SensorDataString.h"
 #include "xbot_msgs/SensorDataDouble.h"
 #include "xbot_msgs/RobotState.h"
+#include "xbot_msgs/ActionData.h"
+#include "xbot_msgs/RegisterActionsSrv.h"
+#include "xbot_msgs/ActionInfo.h"
+#include "xbot_msgs/MapOverlay.h"
 #include <mqtt/async_client.h>
 #include <nlohmann/json.hpp>
 #include "geometry_msgs/Twist.h"
 #include "std_msgs/String.h"
-#include "xbot_msgs/RegisterActionsSrv.h"
-#include "xbot_msgs/ActionInfo.h"
-#include "xbot_msgs/MapOverlay.h"
+#include "nav_msgs/Path.h"
 
 //#define SEND_VEL_COMD
 
@@ -32,6 +34,8 @@ void publish_version();
 
 // Stores registered actions (prefix to vector<action>)
 std::map<std::string, std::vector<xbot_msgs::ActionInfo>> registered_actions;
+std::vector<xbot_msgs::ActionInfo> last_registered_actions;
+std::string last_actions_node;
 
 // Maps a topic to a subscriber.
 std::map<std::string, ros::Subscriber> active_subscribers;
@@ -49,11 +53,13 @@ std::mutex mqtt_callback_mutex;
 // Publisher for cmd_vel and commands
 ros::Publisher cmd_vel_pub;
 ros::Publisher action_pub;
-
+ros::Publisher action_ext_pub;
 
 #ifdef SEND_VEL_COMD
 geometry_msgs::Twist last_cmd_vel;
 #endif
+
+bool publish_json = false;
 
 // properties for external mqtt
 bool external_mqtt_enable = false;
@@ -84,6 +90,7 @@ class MqttCallback : public mqtt::callback {
         client_->subscribe(this->mqtt_topic_prefix + "teleop", 0);
         client_->subscribe(this->mqtt_topic_prefix + "command", 0);
         client_->subscribe(this->mqtt_topic_prefix + "action", 0);
+        client_->subscribe(this->mqtt_topic_prefix + "actionJson", 0);
     }
 
 public:
@@ -102,6 +109,23 @@ public:
             } catch (const json::exception &e) {
                 ROS_ERROR_STREAM("[xbot_monitoring] Error decoding /teleop bson: " << e.what());
             }
+        } else if(ptr->get_topic() == this->mqtt_topic_prefix + "actionJson") {
+            ROS_INFO_STREAM("[xbot_monitoring] Got json action: " + ptr->get_payload());
+            xbot_msgs::ActionData action_msg;
+            json json = json::parse(ptr->get_payload_str());
+            if(!json.contains("action")){
+                ROS_INFO_STREAM("[xbot_monitoring] No required 'action' json property " << json);
+                return;
+            }
+            action_msg.action_id = json["action"];
+            if(json.contains("parameters")) {
+              action_msg.parameters = json["parameters"];
+            }else{
+              ROS_INFO_STREAM("[xbot_monitoring] json 'parameters' property not found");
+            }
+            //json &parametersJson = json.at("parameters");
+            //std::map<std::string, bool> parmeters = json.at("parameters").get<std::map<std::string, bool>>();
+            action_ext_pub.publish(action_msg);
         } else if(ptr->get_topic() == this->mqtt_topic_prefix + "action") {
             ROS_INFO_STREAM("[xbot_monitoring] Got action: " + ptr->get_payload());
             std_msgs::String action_msg;
@@ -194,15 +218,17 @@ void setupMqttClient() {
 }
 
 void try_publish(std::string topic, std::string data, bool retain = false) {
-    try {
-        if (retain) {
-            // QOS 1 so that the data actually arrives at the client at least once.
-            client_->publish(topic, data, 1, true);
-        } else {
-            client_->publish(topic, data);
+    if(publish_json) {
+        try {
+            if (retain) {
+                // QOS 1 so that the data actually arrives at the client at least once.
+                client_->publish(topic, data, 1, true);
+            } else {
+                client_->publish(topic, data);
+            }
+        } catch (const mqtt::exception &e) {
+            // client disconnected or something, we drop it.
         }
-    } catch (const mqtt::exception &e) {
-        // client disconnected or something, we drop it.
     }
     // publish external
     if(external_mqtt_enable) {
@@ -236,7 +262,9 @@ void publish_version() {
     json version = {
             {"version", version_string}
     };
-    try_publish("version", version.dump(), true);
+    if(publish_json) {
+        try_publish("version", version.dump(), true);
+    }
     auto bson = json::to_bson(version);
     try_publish_binary("version", bson.data(), bson.size(), true);
 }
@@ -315,7 +343,9 @@ void publish_sensor_metadata() {
         info["upper_critical_value"] = kv.second.upper_critical_value;
         sensor_info.push_back(info);
     }
-    try_publish("sensor_infos/json", sensor_info.dump(), true);
+    if(publish_json) {
+        try_publish("sensor_infos/json", sensor_info.dump(), true);
+    }
     json data;
     data["d"] = sensor_info;
     auto bson = json::to_bson(data);
@@ -333,7 +363,9 @@ void subscribe_to_sensor(std::string topic) {
         case xbot_msgs::SensorInfo::TYPE_DOUBLE: {
             ros::Subscriber s = n->subscribe<xbot_msgs::SensorDataDouble>(data_topic, 10, [&info = sensor](
                     const xbot_msgs::SensorDataDouble::ConstPtr &msg) {
-                try_publish("sensors/" + info.sensor_id + "/data", std::to_string(msg->data));
+                if(publish_json) {
+                    try_publish("sensors/" + info.sensor_id + "/data", std::to_string(msg->data));
+                }
 
                 json data;
                 data["d"] = msg->data;
@@ -346,7 +378,9 @@ void subscribe_to_sensor(std::string topic) {
         case xbot_msgs::SensorInfo::TYPE_STRING: {
             ros::Subscriber s = n->subscribe<xbot_msgs::SensorDataString>(data_topic, 10, [&info = sensor](
                     const xbot_msgs::SensorDataString::ConstPtr &msg) {
-                try_publish("sensors/" + info.sensor_id + "/data", msg->data);
+                if(publish_json) {
+                        try_publish("sensors/" + info.sensor_id + "/data", msg->data);
+                }
 
                 json data;
                 data["d"] = msg->data;
@@ -387,7 +421,9 @@ void robot_state_callback(const xbot_msgs::RobotState::ConstPtr &msg) {
     j["cmd_vel"]["rz"] = last_cmd_vel.angular.z;
 #endif
 
-    try_publish("robot_state/json", j.dump());
+    if(publish_json) {
+        try_publish("robot_state/json", j.dump());
+    }
     json data;
     data["d"] = j;
     auto bson = json::to_bson(data);
@@ -402,7 +438,7 @@ void cmd_vel_callback(const geometry_msgs::Twist::ConstPtr &msg) {
 
 void publish_actions() {
     json actions = json::array();
-    for(const auto &kv : registered_actions) {
+    /*for(const auto &kv : registered_actions) {
         for(const auto &action : kv.second) {
             json action_info;
             action_info["action_id"] = kv.first + "/" + action.action_id;
@@ -410,9 +446,18 @@ void publish_actions() {
             action_info["enabled"] = action.enabled;
             actions.push_back(action_info);
         }
+    }*/
+    for(const auto &action : last_registered_actions) {
+        json action_info;
+        action_info["action_id"] = last_actions_node + "/" + action.action_id;
+        action_info["action_name"] = action.action_name;
+        action_info["enabled"] = action.enabled;
+        actions.push_back(action_info);
     }
 
-    try_publish("actions/json", actions.dump(), true);
+    if(publish_json) {
+        try_publish("actions/json", actions.dump(), true);
+    }
     json data;
     data["d"] = actions;
 
@@ -423,7 +468,9 @@ void publish_actions() {
 void publish_map() {
     if(!has_map)
         return;
-    try_publish("map/json", map.dump(), true);
+    if(publish_json) {
+        try_publish("map/json", map.dump(), true);
+    }
     json data;
     data["d"] = map;
     auto bson = json::to_bson(data);
@@ -433,11 +480,15 @@ void publish_map() {
 void publish_map_overlay() {
     if(!has_map_overlay)
         return;
-    try_publish("map_overlay/json", map_overlay.dump(), true);
+    if(publish_json) {
+        //retain false and QoS = 0 important because map overlay flood the MQTT during area recording
+        try_publish("map_overlay/json", map_overlay.dump(), false);
+    }
     json data;
     data["d"] = map_overlay;
     auto bson = json::to_bson(data);
-    try_publish_binary("map_overlay/bson", bson.data(), bson.size(), true);
+    //retain false and QoS = 0 important because map overlay flood the MQTT during area recording
+    try_publish_binary("map_overlay/bson", bson.data(), bson.size(), false);
 }
 
 void map_callback(const xbot_msgs::Map::ConstPtr &msg) {
@@ -480,12 +531,10 @@ void map_callback(const xbot_msgs::Map::ConstPtr &msg) {
     publish_map();
 }
 
-
-void map_overlay_callback(const xbot_msgs::MapOverlay::ConstPtr &msg) {
+void convert_to_json_and_publish_map_overlay(const xbot_msgs::MapOverlay &mapOverlay) {
     // Build a JSON and publish it
-
     json polys;
-    for(const auto &poly : msg->polygons) {
+    for(const auto &poly : mapOverlay.polygons) {
         if(poly.polygon.points.size() < 2)
             continue;
         json poly_j;
@@ -513,12 +562,38 @@ void map_overlay_callback(const xbot_msgs::MapOverlay::ConstPtr &msg) {
     publish_map_overlay();
 }
 
+void map_overlay_callback(const xbot_msgs::MapOverlay::ConstPtr &msg) {
+    convert_to_json_and_publish_map_overlay(*msg);
+}
+
+void plan_callback(const nav_msgs::Path::ConstPtr &msg) {
+    xbot_msgs::MapOverlay mapOverlay;
+    // push a new poly to the visualization overlay
+    {
+        xbot_msgs::MapOverlayPolygon poly_viz;
+        poly_viz.closed = false;
+        poly_viz.line_width = 0.1;
+        poly_viz.color = "blue";
+        mapOverlay.polygons.push_back(poly_viz);
+    }
+    auto &poly_viz = mapOverlay.polygons.back();
+    for(auto &pose : msg->poses) {
+        geometry_msgs::Point32 pt;
+        pt.x = pose.pose.position.x;
+        pt.y = pose.pose.position.y;
+        pt.z = pose.pose.position.z;
+        poly_viz.polygon.points.push_back(pt);
+    }
+    convert_to_json_and_publish_map_overlay(mapOverlay);
+}
 
 bool registerActions(xbot_msgs::RegisterActionsSrvRequest &req, xbot_msgs::RegisterActionsSrvResponse &res) {
 
     ROS_INFO_STREAM("[xbot_monitoring] new actions registered: " << req.node_prefix << " registered " << req.actions.size() << " actions.");
 
     registered_actions[req.node_prefix] = req.actions;
+    last_registered_actions = req.actions;
+    last_actions_node = req.node_prefix;
 
     publish_actions();
     return true;
@@ -537,6 +612,8 @@ int main(int argc, char **argv) {
     if(version_string.empty()) {
         version_string = "UNKNOWN VERSION";
     }
+
+    publish_json = paramNh.param("publish_json", false);
 
     external_mqtt_enable = paramNh.param("external_mqtt_enable", false);
     external_mqtt_topic_prefix = paramNh.param("external_mqtt_topic_prefix", std::string(""));
@@ -566,9 +643,15 @@ int main(int argc, char **argv) {
 #endif
     ros::Subscriber mapOverlaySubscriber = n->subscribe("xbot_monitoring/map_overlay", 10, map_overlay_callback);
 
+    ///move_base_flex/DockingFTCPlanner/global_point
+    ///move_base_flex/FTCPlanner/global_point
+    ros::Subscriber plan1Subscriber = n->subscribe("move_base_flex/DockingFTCPlanner/global_plan", 10, plan_callback);
+    ros::Subscriber plan2Subscriber = n->subscribe("move_base_flex/FTCPlanner/global_plan", 10, plan_callback);
+    
+
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
     action_pub = n->advertise<std_msgs::String>("xbot/action", 1);
-
+    action_ext_pub = n->advertise<xbot_msgs::ActionData>("xbot/action_ext", 1);
 
     ros::AsyncSpinner spinner(1);
     spinner.start();
