@@ -327,6 +327,10 @@ void publish_sensor_metadata() {
                 info["value_description"] = "REVOLUTIONS";
                 break;
             }
+            case xbot_msgs::SensorInfo::VALUE_DESCRIPTION_DEGREE: {
+                info["value_description"] = "DEGREE";
+                break;
+            }
             default: {
                 info["value_description"] = "UNKNOWN";
                 break;
