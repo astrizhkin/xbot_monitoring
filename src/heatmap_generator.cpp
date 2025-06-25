@@ -29,7 +29,7 @@ bool save(const std::string &mapName, const std::string &sensor_id, grid_map::Gr
     ROS_INFO_STREAM("[heatmap_generator] Save heatmap "<<mapName<<" for sensor "<<sensor_id);
     bool res = grid_map::GridMapRosConverter::saveToBag(gridMap,mapName + "_" + sensor_id + ".bag","gridmap");    
     if(!res) {
-        ROS_ERROR("[heatmap_generator] Grid map save error");
+        ROS_ERROR("[heatmap_generator] Grid heatmap save error");
     }
     return res;
     //rosbag::Bag bag;
@@ -44,7 +44,7 @@ bool load(const std::string &mapName, const std::string &sensor_id,grid_map::Gri
     try {
         bool res = grid_map::GridMapRosConverter::loadFromBag(mapName + "_" + sensor_id + ".bag","gridmap",gridMap);
         if(!res) {
-            ROS_ERROR("[heatmap_generator] Grid map load error");
+            ROS_ERROR("[heatmap_generator] Grid heatmap load error");
         }
         return res;
     } catch(rosbag::BagIOException &e) {
@@ -75,7 +75,7 @@ void onMap(const xbot_msgs::Map &mapInfo) {
                                         grid_map::Position(mapInfo.mapCenterX, mapInfo.mapCenterY));
             grid_map::GridMap loadMap;
             if(load(mapInfo.name, key, loadMap)){
-                ROS_INFO_STREAM("[heatmap_generator] Copying "<<(int)loadMap.getLayers().size()<<" layers from loaded map "<<mapInfo.name<<" sensor "<<key);
+                ROS_INFO_STREAM("[heatmap_generator] Copying "<<(int)loadMap.getLayers().size()<<" layers from loaded heatmap "<<mapInfo.name<<" sensor "<<key);
                 for (grid_map::GridMapIterator iterator(loadMap); !iterator.isPastEnd(); ++iterator) {
                     const grid_map::Index index(*iterator);
                     grid_map::Position indexPos;
@@ -83,13 +83,13 @@ void onMap(const xbot_msgs::Map &mapInfo) {
                     for(auto &layerName : loadMap.getLayers()){
                         float val = loadMap.at(layerName, index);
                         if(!isnan(val)){
-                            ROS_INFO_STREAM("[heatmap_generator] Copy from loaded map "<<mapInfo.name<<" sensor "<<key<<" layer "<<layerName<<" at pos "<<indexPos.x()<<","<<indexPos.y()<<" value "<<val);
+                            //ROS_INFO_STREAM("[heatmap_generator] Copy from loaded map "<<mapInfo.name<<" sensor "<<key<<" layer "<<layerName<<" at pos "<<indexPos.x()<<","<<indexPos.y()<<" value "<<val);
                             sensorMap.atPosition(layerName, indexPos) = val;
                         }
                     }
                 }
             } else {
-                ROS_WARN_STREAM("[heatmap_generator] Unable to load map "<<mapInfo.name<<" sensor "<<key);
+                ROS_WARN_STREAM("[heatmap_generator] Unable to load heatmap "<<mapInfo.name<<" sensor "<<key);
             }
         }
         has_map = true;
@@ -124,7 +124,7 @@ void onSensorData(const std::string& sensor_id, const xbot_msgs::SensorDataDoubl
     grid_map::GridMapRosConverter::toPointCloud(map, map.getLayers(), "elevation", mapmsg);
     publisher.publish(mapmsg);
     ros::Time now = ros::Time::now();
-    if(now > last_save + ros::Duration(10.0)) {
+    if(now > last_save + ros::Duration(600.0)) {
         save(lastMap.name, sensor_id, map);
         last_save = now; 
     }
