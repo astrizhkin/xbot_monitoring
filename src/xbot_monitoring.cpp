@@ -19,6 +19,7 @@
 #include <mqtt/async_client.h>
 #include <nlohmann/json.hpp>
 #include "geometry_msgs/Twist.h"
+#include "geometry_msgs/PoseStamped.h"
 #include "std_msgs/String.h"
 #include "nav_msgs/Path.h"
 
@@ -591,6 +592,10 @@ void plan_callback(const nav_msgs::Path::ConstPtr &msg) {
     convert_to_json_and_publish_map_overlay(mapOverlay);
 }
 
+void goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg) {
+    ROS_WARN_STREAM("[xbot_monitoring] goal received, implement display "<<msg->pose.position.x<<","<<msg->pose.position.y);
+}
+
 bool registerActions(xbot_msgs::RegisterActionsSrvRequest &req, xbot_msgs::RegisterActionsSrvResponse &res) {
 
     ROS_INFO_STREAM("[xbot_monitoring] new actions registered: " << req.node_prefix << " registered " << req.actions.size() << " actions.");
@@ -651,6 +656,7 @@ int main(int argc, char **argv) {
     ///move_base_flex/FTCPlanner/global_point
     ros::Subscriber plan1Subscriber = n->subscribe("move_base_flex/DockingFTCPlanner/global_plan", 10, plan_callback);
     ros::Subscriber plan2Subscriber = n->subscribe("move_base_flex/FTCPlanner/global_plan", 10, plan_callback);
+    ros::Subscriber goalSubscriber = n->subscribe("move_base_flex/current_goal",10, goal_callback);
     
 
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
