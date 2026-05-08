@@ -332,6 +332,10 @@ void publish_sensor_metadata() {
                 info["value_description"] = "DEGREE";
                 break;
             }
+            case xbot_msgs::SensorInfo::VALUE_DESCRIPTION_SIGNAL: {
+                info["value_description"] = "SIGNAL";
+                break;
+            }
             default: {
                 info["value_description"] = "UNKNOWN";
                 break;
