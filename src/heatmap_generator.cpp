@@ -21,7 +21,8 @@
 ros::NodeHandle *n;
 
 xbot_msgs::AbsolutePose last_pose{};
-std::unordered_map<std::string, std::tuple<grid_map::GridMap, ros::Publisher,ros::Time>> pubsub_map{};
+// sensor_id -> (map, publisher, last_save_time, resolution)
+std::unordered_map<std::string, std::tuple<grid_map::GridMap, ros::Publisher, ros::Time, double>> pubsub_map{};
 xbot_msgs::Map lastMap{};
 bool has_map = false;
 
@@ -71,7 +72,8 @@ void onMap(const xbot_msgs::Map &mapInfo) {
         ROS_INFO("[heatmap_generator] Updated heatmap geometry.");
         for(auto & [key,value] : pubsub_map) {
             grid_map::GridMap &sensorMap = std::get<0>(value);
-            sensorMap.setGeometry(grid_map::Length(mapInfo.mapWidth, mapInfo.mapHeight), 0.2,
+            double resolution = std::get<3>(value);
+            sensorMap.setGeometry(grid_map::Length(mapInfo.mapWidth, mapInfo.mapHeight), resolution,
                                         grid_map::Position(mapInfo.mapCenterX, mapInfo.mapCenterY));
             grid_map::GridMap loadMap;
             if(load(mapInfo.name, key, loadMap)){
@@ -101,7 +103,7 @@ void onSensorData(const std::string& sensor_id, const xbot_msgs::SensorDataDoubl
     if(!has_map) {
         return;
     }
-    auto & [map, publisher, last_save] = pubsub_map[sensor_id];
+    auto & [map, publisher, last_save, resolution] = pubsub_map[sensor_id];
     try {
         grid_map::Position pos(last_pose.pose.pose.position.x, last_pose.pose.pose.position.y);
         float oldValue = map.atPosition("intensity", pos);
@@ -158,9 +160,20 @@ int main(int argc, char **argv) {
     ros::Subscriber mapSubscriber = n->subscribe("xbot_monitoring/map", 1, onMap);
 
     std::vector<ros::Subscriber> sensorSubscribers{};
-    for(const auto & sensor_id : sensor_ids)
+    for(const auto & entry : sensor_ids)
     {
-        ROS_INFO_STREAM("[heatmap_generator] Generating heatmap for sensor id: " << sensor_id);
+        // Parse optional resolution suffix: "sensor_id" or "sensor_id=resolution"
+        std::string sensor_id = entry;
+        double resolution = 0.2;  // default
+        auto eq_pos = entry.find('=');
+        if(eq_pos != std::string::npos) {
+            sensor_id = entry.substr(0, eq_pos);
+            resolution = std::stod(entry.substr(eq_pos + 1));
+        }
+
+        ROS_INFO_STREAM("[heatmap_generator] Generating heatmap for sensor " << sensor_id
+                        << " resolution=" << resolution << "m");
+
         // Add layer to map
         grid_map::GridMap map{};
         map.add("intensity");
@@ -175,7 +188,7 @@ int main(int argc, char **argv) {
                                                             onSensorData(sensor_id, msg);
                                                         });
         // store in map, so that they don't get deconstructed
-        pubsub_map[sensor_id] = std::make_tuple(std::move(map), std::move(p), ros::Time::ZERO);
+        pubsub_map[sensor_id] = std::make_tuple(std::move(map), std::move(p), ros::Time::ZERO, resolution);
         sensorSubscribers.push_back(std::move(s));
     }
 
