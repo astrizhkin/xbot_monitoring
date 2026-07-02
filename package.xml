@@ -23,6 +23,8 @@
   <depend>grid_map_core</depend>
   <depend>grid_map_ros</depend>
   <depend>grid_map_msgs</depend>
+  <depend>dynamic_reconfigure</depend>
+  <depend>mower_logic</depend>
 
   <!-- The export tag contains other, unspecified, tags -->
   <export>

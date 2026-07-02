@@ -22,6 +22,8 @@
 #include "geometry_msgs/PoseStamped.h"
 #include "std_msgs/String.h"
 #include "nav_msgs/Path.h"
+#include "mower_logic/MowerLogicConfig.h"
+#include <dynamic_reconfigure/client.h>
 
 //#define SEND_VEL_COMD
 
@@ -55,6 +57,13 @@ std::mutex mqtt_callback_mutex;
 ros::Publisher cmd_vel_pub;
 ros::Publisher action_pub;
 ros::Publisher action_ext_pub;
+
+dynamic_reconfigure::Client<mower_logic::MowerLogicConfig> *mower_logic_reconfig_client = nullptr;
+mower_logic::MowerLogicConfig current_mower_config;
+
+void mower_config_callback(const mower_logic::MowerLogicConfig &config) {
+  current_mower_config = config;
+}
 
 #ifdef SEND_VEL_COMD
 geometry_msgs::Twist last_cmd_vel;
@@ -112,21 +121,62 @@ public:
             }
         } else if(ptr->get_topic() == this->mqtt_topic_prefix + "actionJson") {
             ROS_INFO_STREAM("[xbot_monitoring] Got json action: " + ptr->get_payload());
-            xbot_msgs::ActionData action_msg;
-            json json = json::parse(ptr->get_payload_str());
-            if(!json.contains("action")){
-                ROS_INFO_STREAM("[xbot_monitoring] No required 'action' json property " << json);
+            json actionJson = json::parse(ptr->get_payload_str());
+            if (!actionJson.contains("action")) {
+                ROS_INFO_STREAM("[xbot_monitoring] No required 'action' json property " << actionJson);
                 return;
             }
-            action_msg.action_id = json["action"];
-            if(json.contains("parameters")) {
-              action_msg.parameters = json["parameters"];
-            }else{
-              ROS_INFO_STREAM("[xbot_monitoring] json 'parameters' property not found");
+            std::string action_id = actionJson["action"];
+
+            if(action_id == "setParameter") {
+                if(!actionJson.contains("config") || !mower_logic_reconfig_client) {
+                    ROS_ERROR_STREAM("[xbot_monitoring] setParameter missing 'config' or client not initialized");
+                    return;
+                }
+                mower_logic::MowerLogicConfig config = current_mower_config;
+                const auto &params = actionJson["config"];
+                if(params.contains("mower_power"))
+                    config.mower_power = params["mower_power"].get<double>();
+                if(params.contains("sensor_behavior"))
+                    config.sensor_behavior = params["sensor_behavior"].get<int>();
+                if(params.contains("perimeter_dry_run"))
+                    config.perimeter_dry_run = params["perimeter_dry_run"].get<bool>();
+                if(params.contains("dock_station_at_home"))
+                    config.dock_station_at_home = params["dock_station_at_home"].get<bool>();
+                mower_logic_reconfig_client->setConfiguration(config);
+                ROS_INFO_STREAM("[xbot_monitoring] Parameter update sent to mower_logic");
+            } else if(action_id == "getParameter") {
+                if(!mower_logic_reconfig_client) {
+                    ROS_ERROR_STREAM("[xbot_monitoring] getParameter client not initialized");
+                    return;
+                }
+                mower_logic::MowerLogicConfig config = current_mower_config;
+                json response_config;
+                response_config["mower_power"] = config.mower_power;
+                response_config["sensor_behavior"] = config.sensor_behavior;
+                response_config["perimeter_dry_run"] = config.perimeter_dry_run;
+                response_config["dock_station_at_home"] = config.dock_station_at_home;
+                json response_obj = {{"node", "mower_logic"}, {"config", response_config}};
+                try {
+                    client_->publish("parameterState/json", response_obj.dump());
+                } catch (const mqtt::exception &e) {
+                    ROS_ERROR_STREAM("[xbot_monitoring] Failed to publish parameterState/json: " << e.what());
+                }
+                auto bson = json::to_bson(response_obj);
+                try {
+                    client_->publish("parameterState/bson", bson.data(), bson.size());
+                } catch (const mqtt::exception &e) {
+                    ROS_ERROR_STREAM("[xbot_monitoring] Failed to publish parameterState/bson: " << e.what());
+                }
+            } else {
+                // Default: forward as ActionData (existing behavior)
+                xbot_msgs::ActionData action_msg;
+                action_msg.action_id = action_id;
+                if(actionJson.contains("parameters")) {
+                  action_msg.parameters = actionJson["parameters"];
+                }
+                action_ext_pub.publish(action_msg);
             }
-            //json &parametersJson = json.at("parameters");
-            //std::map<std::string, bool> parmeters = json.at("parameters").get<std::map<std::string, bool>>();
-            action_ext_pub.publish(action_msg);
         } else if(ptr->get_topic() == this->mqtt_topic_prefix + "action") {
             ROS_INFO_STREAM("[xbot_monitoring] Got action: " + ptr->get_payload());
             std_msgs::String action_msg;
@@ -666,6 +716,8 @@ int main(int argc, char **argv) {
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
     action_pub = n->advertise<std_msgs::String>("xbot/action", 1);
     action_ext_pub = n->advertise<xbot_msgs::ActionData>("xbot/action_ext", 1);
+
+    mower_logic_reconfig_client = new dynamic_reconfigure::Client<mower_logic::MowerLogicConfig>("/mower_logic", mower_config_callback);
 
     ros::AsyncSpinner spinner(1);
     spinner.start();
