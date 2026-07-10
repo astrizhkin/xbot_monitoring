@@ -49,7 +49,6 @@ ros::NodeHandle *n;
 
 // The MQTT Client
 std::shared_ptr<mqtt::async_client> client_;
-std::shared_ptr<mqtt::async_client> client_external_;
 
 std::mutex mqtt_callback_mutex;
 
@@ -80,6 +79,46 @@ std::string external_mqtt_topic_prefix = "";
 std::string external_mqtt_port = "";
 std::string version_string = "";
 
+
+void try_publish(std::string topic, std::string data, bool retain = false) {
+    if(publish_json) {
+        try {
+            if (retain) {
+                // QOS 1 so that the data actually arrives at the client at least once.
+                client_->publish(external_mqtt_topic_prefix + topic, data, 1, true);
+            } else {
+                client_->publish(external_mqtt_topic_prefix + topic, data);
+            }
+        } catch (const mqtt::exception &e) {
+            ROS_ERROR_STREAM("[xbot_monitoring] Error publish json: " << e.what());
+        }
+    }
+}
+
+void try_publish_binary(std::string topic, const void *data, size_t size, bool retain = false) {
+    try {
+        if (retain) {
+            // QOS 1 so that the data actually arrives at the client at least once.
+            client_->publish(external_mqtt_topic_prefix + topic, data, size, 1, true);
+        } else {
+            client_->publish(external_mqtt_topic_prefix + topic, data, size);
+        }
+    } catch (const mqtt::exception &e) {
+        ROS_ERROR_STREAM("[xbot_monitoring] Error publish bson: " << e.what());
+    }
+}
+
+void try_publish_all(std::string topic, json& object, bool retain = false) {
+    if(publish_json) {
+        try_publish(topic+"/json", object.dump(), retain);
+    }
+    json data;
+    data["d"] = object;
+    auto bson = json::to_bson(data);
+    try_publish_binary(topic + "/bson", bson.data(), bson.size(), retain);
+}
+
+
 class MqttCallback : public mqtt::callback {
 
     void connected(const mqtt::string &string) override {
@@ -104,6 +143,7 @@ class MqttCallback : public mqtt::callback {
     }
 
 public:
+
     void setMqttClient(std::shared_ptr<mqtt::async_client> c, const std::string &mqtt_topic_prefix) {
         this->client_ = std::move(c);
         this->mqtt_topic_prefix = mqtt_topic_prefix;
@@ -157,17 +197,7 @@ public:
                 response_config["perimeter_dry_run"] = config.perimeter_dry_run;
                 response_config["dock_station_at_home"] = config.dock_station_at_home;
                 json response_obj = {{"node", "mower_logic"}, {"config", response_config}};
-                try {
-                    client_->publish("parameterState/json", response_obj.dump());
-                } catch (const mqtt::exception &e) {
-                    ROS_ERROR_STREAM("[xbot_monitoring] Failed to publish parameterState/json: " << e.what());
-                }
-                auto bson = json::to_bson(response_obj);
-                try {
-                    client_->publish("parameterState/bson", bson.data(), bson.size());
-                } catch (const mqtt::exception &e) {
-                    ROS_ERROR_STREAM("[xbot_monitoring] Failed to publish parameterState/bson: " << e.what());
-                }
+                try_publish_all("parameterState",response_obj,true);
             } else {
                 // Default: forward as ActionData (existing behavior)
                 xbot_msgs::ActionData action_msg;
@@ -197,7 +227,6 @@ private:
 };
 
 MqttCallback mqtt_callback;
-MqttCallback mqtt_callback_external;
 
 json map;
 json map_overlay;
@@ -216,14 +245,25 @@ void setupMqttClient() {
         connect_options_.set_keep_alive_interval(1000);
         connect_options_.set_max_inflight(10);
 
+        std::string mqtt_uri;
         // create MQTT client
-        std::string uri = "tcp" + std::string("://") + "127.0.0.1" +
-                          std::string(":") + std::to_string(1883);
+        if(external_mqtt_enable){
+            if(!external_mqtt_username.empty()) {
+                connect_options_.set_user_name(external_mqtt_username);
+                connect_options_.set_password(external_mqtt_password);
+            }
+            // create MQTT client
+            mqtt_uri = "tcp" + std::string("://") + external_mqtt_hostname +
+                            std::string(":") + external_mqtt_port;
+        }else{
+            mqtt_uri = "tcp" + std::string("://") + "127.0.0.1" +
+                            std::string(":") + std::to_string(1883);
+        }
 
         try {
             client_ = std::make_shared<mqtt::async_client>(
-                    uri, "xbot_monitoring");
-            mqtt_callback.setMqttClient(client_, "");
+                    mqtt_uri, "xbot_monitoring");
+            mqtt_callback.setMqttClient(client_, external_mqtt_topic_prefix);
             client_->set_callback(mqtt_callback);
 
             client_->connect(connect_options_);
@@ -233,91 +273,13 @@ void setupMqttClient() {
             exit(EXIT_FAILURE);
         }
     }
-    // setup external mqtt client
-    if(external_mqtt_enable) {
-        // MQTT connection options
-        mqtt::connect_options connect_options_;
-
-        // basic client connection options
-        connect_options_.set_automatic_reconnect(true);
-        connect_options_.set_clean_session(true);
-        connect_options_.set_keep_alive_interval(1000);
-        connect_options_.set_max_inflight(10);
-
-        if(!external_mqtt_username.empty()) {
-            connect_options_.set_user_name(external_mqtt_username);
-            connect_options_.set_password(external_mqtt_password);
-        }
-
-        // create MQTT client
-        std::string uri = "tcp" + std::string("://") + external_mqtt_hostname +
-                          std::string(":") + external_mqtt_port;
-
-        try {
-            client_external_ = std::make_shared<mqtt::async_client>(
-                    uri, "ext_xbot_monitoring");
-            mqtt_callback_external.setMqttClient(client_external_, external_mqtt_topic_prefix);
-            client_external_->set_callback(mqtt_callback_external);
-
-            client_external_->connect(connect_options_);
-
-        } catch (const mqtt::exception &e) {
-            ROS_ERROR("[xbot_monitoring] External Client could not be initialized: %s", e.what());
-            exit(EXIT_FAILURE);
-        }
-    }
-}
-
-void try_publish(std::string topic, std::string data, bool retain = false) {
-    if(publish_json) {
-        try {
-            if (retain) {
-                // QOS 1 so that the data actually arrives at the client at least once.
-                client_->publish(topic, data, 1, true);
-            } else {
-                client_->publish(topic, data);
-            }
-        } catch (const mqtt::exception &e) {
-            // client disconnected or something, we drop it.
-        }
-    }
-    // publish external
-    if(external_mqtt_enable) {
-        try {
-            if (retain) {
-                // QOS 1 so that the data actually arrives at the client at least once.
-                client_external_->publish(external_mqtt_topic_prefix + topic, data, 1, true);
-            } else {
-                client_external_->publish(external_mqtt_topic_prefix + topic, data);
-            }
-        } catch (const mqtt::exception &e) {
-            // client disconnected or something, we drop it.
-        }
-    }
-}
-
-void try_publish_binary(std::string topic, const void *data, size_t size, bool retain = false) {
-    try {
-        if (retain) {
-            // QOS 1 so that the data actually arrives at the client at least once.
-            client_->publish(topic, data, size, 1, true);
-        } else {
-            client_->publish(topic, data, size);
-        }
-    } catch (const mqtt::exception &e) {
-        // client disconnected or something, we drop it.
-    }
 }
 
 void publish_version() {
     json version = {
             {"version", version_string}
     };
-    if(publish_json) {
-        try_publish("version", version.dump(), true);
-    }
-    auto bson = json::to_bson(version);
-    try_publish_binary("version", bson.data(), bson.size(), true);
+    try_publish_all("version",version, true);
 }
 
 void publish_sensor_metadata() {
@@ -402,13 +364,7 @@ void publish_sensor_metadata() {
         info["upper_critical_value"] = kv.second.upper_critical_value;
         sensor_info.push_back(info);
     }
-    if(publish_json) {
-        try_publish("sensor_infos/json", sensor_info.dump(), true);
-    }
-    json data;
-    data["d"] = sensor_info;
-    auto bson = json::to_bson(data);
-    try_publish_binary("sensor_infos/bson", bson.data(), bson.size(), true);
+    try_publish_all("sensor_infos",sensor_info,true);
 }
 
 void subscribe_to_sensor(std::string topic) {
@@ -437,8 +393,9 @@ void subscribe_to_sensor(std::string topic) {
         case xbot_msgs::SensorInfo::TYPE_STRING: {
             ros::Subscriber s = n->subscribe<xbot_msgs::SensorDataString>(data_topic, 10, [&info = sensor](
                     const xbot_msgs::SensorDataString::ConstPtr &msg) {
+                
                 if(publish_json) {
-                        try_publish("sensors/" + info.sensor_id + "/data", msg->data);
+                    try_publish("sensors/" + info.sensor_id + "/data", msg->data);
                 }
 
                 json data;
@@ -480,13 +437,7 @@ void robot_state_callback(const xbot_msgs::RobotState::ConstPtr &msg) {
     j["cmd_vel"]["rz"] = last_cmd_vel.angular.z;
 #endif
 
-    if(publish_json) {
-        try_publish("robot_state/json", j.dump());
-    }
-    json data;
-    data["d"] = j;
-    auto bson = json::to_bson(data);
-    try_publish_binary("robot_state/bson", bson.data(), bson.size());
+    try_publish_all("robot_state",j,false);
 }
 
 #ifdef SEND_VEL_COMD
@@ -514,40 +465,22 @@ void publish_actions() {
         actions.push_back(action_info);
     }
 
-    if(publish_json) {
-        try_publish("actions/json", actions.dump(), true);
-    }
-    json data;
-    data["d"] = actions;
-
-    auto bson = json::to_bson(data);
-    try_publish_binary("actions/bson", bson.data(), bson.size(), true);
+    try_publish_all("actions", actions, true);
 }
 
 void publish_map() {
     if(!has_map)
         return;
-    if(publish_json) {
-        try_publish("map/json", map.dump(), true);
-    }
-    json data;
-    data["d"] = map;
-    auto bson = json::to_bson(data);
-    try_publish_binary("map/bson", bson.data(), bson.size(), true);
+    try_publish_all("map",map, true);
 }
 
 void publish_map_overlay() {
     if(!has_map_overlay)
         return;
-    if(publish_json) {
-        //retain false and QoS = 0 important because map overlay flood the MQTT during area recording
-        try_publish("map_overlay/json", map_overlay.dump(), false);
-    }
-    json data;
-    data["d"] = map_overlay;
-    auto bson = json::to_bson(data);
+    
     //retain false and QoS = 0 important because map overlay flood the MQTT during area recording
-    try_publish_binary("map_overlay/bson", bson.data(), bson.size(), false);
+
+    try_publish_all("map_overlay",map_overlay, false);
 }
 
 void map_callback(const xbot_msgs::Map::ConstPtr &msg) {
