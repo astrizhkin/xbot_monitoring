@@ -24,6 +24,9 @@
 #include "nav_msgs/Path.h"
 #include "mower_logic/MowerLogicConfig.h"
 #include <dynamic_reconfigure/client.h>
+#include "e3_lib/e3parser.h"
+#include "e3_lib/E3KVInput.h"
+#include "e3_lib/ScheduleE3KV.h"
 
 //#define SEND_VEL_COMD
 
@@ -39,6 +42,12 @@ void publish_version();
 std::map<std::string, std::vector<xbot_msgs::ActionInfo>> registered_actions;
 std::vector<xbot_msgs::ActionInfo> last_registered_actions;
 std::string last_actions_node;
+
+// E3 command key → action_id mapping
+std::map<uint16_t, std::string> e3_key_to_action;
+
+// E3 service client (schedule transmission via bridge)
+ros::ServiceClient e3_schedule_client;
 
 // Maps a topic to a subscriber.
 std::map<std::string, ros::Subscriber> active_subscribers;
@@ -362,6 +371,7 @@ void publish_sensor_metadata() {
         info["lower_critical_value"] = kv.second.lower_critical_value;
         info["has_critical_high"] = kv.second.has_critical_high;
         info["upper_critical_value"] = kv.second.upper_critical_value;
+        info["e3_key"] = kv.second.e3_key;
         sensor_info.push_back(info);
     }
     try_publish_all("sensor_infos",sensor_info,true);
@@ -386,6 +396,19 @@ void subscribe_to_sensor(std::string topic) {
                 data["d"] = msg->data;
                 auto bson = json::to_bson(data);
                 try_publish_binary("sensors/" + info.sensor_id + "/bson", bson.data(), bson.size());
+
+                // Schedule E3KV transmission for sensors with an assigned E3 key
+                if (info.e3_key != 0 && e3_schedule_client) {
+                    float32_t val = static_cast<float32_t>(msg->data);
+                    e3_lib::E3KVInput kv_msg;
+                    kv_msg.key = info.e3_key;
+                    kv_msg.cmd_type = static_cast<uint8_t>(e3::SET);
+                    kv_msg.data_unit = static_cast<uint8_t>(e3::FLOAT32);
+                    kv_msg.payload.assign(
+                        reinterpret_cast<const uint8_t*>(&val),
+                        reinterpret_cast<const uint8_t*>(&val) + sizeof(val));
+                    send_e3kv(kv_msg);
+                }
             });
             sensor_data_subscribers.push_back(s);
             break;
@@ -583,6 +606,58 @@ void goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg) {
     ROS_WARN_STREAM("[xbot_monitoring] goal received, implement display "<<msg->pose.position.x<<","<<msg->pose.position.y);
 }
 
+// ── E3 helpers ──────────────────────────────────────────────────────────────
+
+static void send_e3kv(const e3_lib::E3KVInput& kv_msg) {
+    e3_lib::ScheduleE3KV srv;
+    srv.request.kvs.push_back(kv_msg);
+    if (e3_schedule_client.call(srv)) {
+        ROS_DEBUG("[xbot_monitoring] E3KV scheduled: key=0x%04X -> %s", kv_msg.key, srv.response.message.c_str());
+    } else {
+        ROS_WARN("[xbot_monitoring] Failed to schedule E3KV: key=0x%04X", kv_msg.key);
+    }
+}
+
+static void send_e3_actions_list() {
+    // Collect all registered E3 keys from actions
+    std::vector<uint16_t> keys;
+    for (const auto& [prefix, actions] : registered_actions) {
+        for (const auto& a : actions) {
+            if (a.e3_key != 0) keys.push_back(a.e3_key);
+        }
+    }
+    if (keys.empty()) return;
+
+    std::vector<uint8_t> payload;
+    for (uint16_t k : keys) {
+        payload.push_back((k >> 8) & 0xFF);
+        payload.push_back(k & 0xFF);
+    }
+    e3_lib::E3KVInput kv_msg;
+    kv_msg.key = e3::CMD_ACTIONS_LIST;
+    kv_msg.cmd_type = static_cast<uint8_t>(e3::SET);
+    kv_msg.data_unit = static_cast<uint8_t>(e3::BYTE);
+    kv_msg.payload = payload;
+    send_e3kv(kv_msg);
+    ROS_INFO("[xbot_monitoring] Actions list sent: %zu keys to ESPHome", keys.size());
+}
+
+static void on_rx_e3kv(const e3_lib::E3KVInput::ConstPtr& msg) {
+    // Dispatch incoming commands (ESPHome → mower_logic)
+    if (msg->cmd_type == static_cast<uint8_t>(e3::SET) && msg->key >= 0x0200 && msg->key <= 0x02FF) {
+        auto it = e3_key_to_action.find(msg->key);
+        if (it != e3_key_to_action.end()) {
+            std_msgs::String action_msg;
+            action_msg.data = it->second;
+            action_pub.publish(action_msg);
+            ROS_INFO("[xbot_monitoring] E3 command: key=0x%04X -> action_id=%s",
+                     msg->key, it->second.c_str());
+        } else {
+            ROS_WARN("[xbot_monitoring] E3 command: key=0x%04X (no action mapping)", msg->key);
+        }
+    }
+}
+
 bool registerActions(xbot_msgs::RegisterActionsSrvRequest &req, xbot_msgs::RegisterActionsSrvResponse &res) {
 
     ROS_INFO_STREAM("[xbot_monitoring] new actions registered: " << req.node_prefix << " registered " << req.actions.size() << " actions.");
@@ -590,6 +665,19 @@ bool registerActions(xbot_msgs::RegisterActionsSrvRequest &req, xbot_msgs::Regis
     registered_actions[req.node_prefix] = req.actions;
     last_registered_actions = req.actions;
     last_actions_node = req.node_prefix;
+
+    // Rebuild E3 key → action_id mapping
+    e3_key_to_action.clear();
+    for (const auto& [prefix, actions] : registered_actions) {
+        for (const auto& a : actions) {
+            if (a.e3_key != 0) {
+                e3_key_to_action[a.e3_key] = a.action_id;
+            }
+        }
+    }
+
+    // Notify ESPHome of available action keys
+    send_e3_actions_list();
 
     publish_actions();
     return true;
@@ -649,6 +737,9 @@ int main(int argc, char **argv) {
     cmd_vel_pub = n->advertise<geometry_msgs::Twist>("xbot_monitoring/remote_cmd_vel", 1);
     action_pub = n->advertise<std_msgs::String>("xbot/action", 1);
     action_ext_pub = n->advertise<xbot_msgs::ActionData>("xbot/action_ext", 1);
+
+    e3_schedule_client = n->serviceClient<e3_lib::ScheduleE3KV>("/radio_bridge/schedule_e3kv");
+    n->subscribe<e3_lib::E3KVInput>("/xbot_radio/rx_e3kv", 10, on_rx_e3kv);
 
     mower_logic_reconfig_client = new dynamic_reconfigure::Client<mower_logic::MowerLogicConfig>("/mower_logic", mower_config_callback);
 
