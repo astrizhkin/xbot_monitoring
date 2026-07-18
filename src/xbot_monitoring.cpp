@@ -127,6 +127,17 @@ void try_publish_all(std::string topic, json& object, bool retain = false) {
     try_publish_binary(topic + "/bson", bson.data(), bson.size(), retain);
 }
 
+// ── E3 helpers ──────────────────────────────────────────────────────────────
+
+static void send_e3kv(const e3_lib::E3KVInput& kv_msg) {
+    e3_lib::ScheduleE3KV srv;
+    srv.request.kvs.push_back(kv_msg);
+    if (e3_schedule_client.call(srv)) {
+        ROS_DEBUG("[xbot_monitoring] E3KV scheduled: key=0x%04X -> %s", kv_msg.key, srv.response.message.c_str());
+    } else {
+        ROS_WARN("[xbot_monitoring] Failed to schedule E3KV: key=0x%04X", kv_msg.key);
+    }
+}
 
 class MqttCallback : public mqtt::callback {
 
@@ -399,7 +410,7 @@ void subscribe_to_sensor(std::string topic) {
 
                 // Schedule E3KV transmission for sensors with an assigned E3 key
                 if (info.e3_key != 0 && e3_schedule_client) {
-                    float32_t val = static_cast<float32_t>(msg->data);
+                    float val = static_cast<float>(msg->data);
                     e3_lib::E3KVInput kv_msg;
                     kv_msg.key = info.e3_key;
                     kv_msg.cmd_type = static_cast<uint8_t>(e3::SET);
@@ -604,18 +615,6 @@ void plan_callback(const nav_msgs::Path::ConstPtr &msg) {
 
 void goal_callback(const geometry_msgs::PoseStamped::ConstPtr &msg) {
     ROS_WARN_STREAM("[xbot_monitoring] goal received, implement display "<<msg->pose.position.x<<","<<msg->pose.position.y);
-}
-
-// ── E3 helpers ──────────────────────────────────────────────────────────────
-
-static void send_e3kv(const e3_lib::E3KVInput& kv_msg) {
-    e3_lib::ScheduleE3KV srv;
-    srv.request.kvs.push_back(kv_msg);
-    if (e3_schedule_client.call(srv)) {
-        ROS_DEBUG("[xbot_monitoring] E3KV scheduled: key=0x%04X -> %s", kv_msg.key, srv.response.message.c_str());
-    } else {
-        ROS_WARN("[xbot_monitoring] Failed to schedule E3KV: key=0x%04X", kv_msg.key);
-    }
 }
 
 static void send_e3_actions_list() {
