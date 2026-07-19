@@ -622,7 +622,7 @@ static void send_e3_actions_list() {
     std::vector<uint16_t> keys;
     for (const auto& [prefix, actions] : registered_actions) {
         for (const auto& a : actions) {
-            if (a.e3_key != 0) keys.push_back(a.e3_key);
+            if (a.e3_key != 0 && a.enabled) keys.push_back(a.e3_key);
         }
     }
     if (keys.empty()) return;
@@ -633,7 +633,7 @@ static void send_e3_actions_list() {
         payload.push_back(k & 0xFF);
     }
     e3_lib::E3KVInput kv_msg;
-    kv_msg.key = e3::CMD_ACTIONS_LIST;
+    kv_msg.key = 0x0100;//Status ACTION_LIST
     kv_msg.cmd_type = static_cast<uint8_t>(e3::SET);
     kv_msg.data_unit = static_cast<uint8_t>(e3::BYTE);
     kv_msg.payload = payload;
