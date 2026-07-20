@@ -178,7 +178,7 @@ static void send_robot_state_telemetry(const xbot_msgs::RobotState::ConstPtr &ms
         srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_POSITION,
             static_cast<uint8_t>(e3::FLOAT32),
             std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(pos),
-                                 reinterpret_cast<const uint8_t*>(pos) + 3)));
+                                 reinterpret_cast<const uint8_t*>(pos) + sizeof(pos))));
     }
 
     // 0x0801: Orientation quaternion [x, y, z, w] as 4x float32
@@ -192,7 +192,7 @@ static void send_robot_state_telemetry(const xbot_msgs::RobotState::ConstPtr &ms
         srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_ORIENTATION,
             static_cast<uint8_t>(e3::FLOAT32),
             std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(quat),
-                                 reinterpret_cast<const uint8_t*>(quat) + 4)));
+                                 reinterpret_cast<const uint8_t*>(quat) + sizeof(quat))));
     }
 
     // 0x0802: Battery percentage (uint8)
@@ -246,7 +246,7 @@ static void send_robot_state_telemetry(const xbot_msgs::RobotState::ConstPtr &ms
         srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_CURRENT_JOB,
             static_cast<uint8_t>(e3::INT16),
             std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(job),
-                                 reinterpret_cast<const uint8_t*>(job) + 3)));
+                                 reinterpret_cast<const uint8_t*>(job) + sizeof(job))));
     }
 
     if (!e3_schedule_client.call(srv)) {
