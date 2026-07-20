@@ -139,6 +139,122 @@ static void send_e3kv(const e3_lib::E3KVInput& kv_msg) {
     }
 }
 
+// ── E3 RobotState telemetry keys (0x08xx range) ────────────────────────────
+
+namespace e3_telemetry {
+    constexpr uint16_t KEY_POSITION       = 0x0800; // 3x float32 [x, y, z]
+    constexpr uint16_t KEY_ORIENTATION    = 0x0801; // 4x float32 [x, y, z, w]
+    constexpr uint16_t KEY_BATTERY_PCT    = 0x0802; // uint8 0-100
+    constexpr uint16_t KEY_GPS_PCT        = 0x0803; // uint8 0-100
+    constexpr uint16_t KEY_IS_CHARGING    = 0x0804; // bool
+    constexpr uint16_t KEY_EMERGENCY      = 0x0805; // uint32 (HL << 16 | LL)
+    constexpr uint16_t KEY_ACTION_PROGRESS= 0x0806; // uint8 0-100
+    constexpr uint16_t KEY_CURRENT_STATE  = 0x0807; // uint8 raw state
+    constexpr uint16_t KEY_CURRENT_JOB    = 0x0808; // 3x int16 [area, path, pose_index]
+}
+
+static void send_robot_state_telemetry(const xbot_msgs::RobotState::ConstPtr &msg) {
+    if (!e3_schedule_client) return;
+
+    e3_lib::ScheduleE3KV srv;
+    srv.request.kvs.reserve(10);
+
+    auto make_kv = [](uint16_t key, uint8_t data_unit, const std::vector<uint8_t> &payload) {
+        e3_lib::E3KVInput kv;
+        kv.key = key;
+        kv.cmd_type = static_cast<uint8_t>(e3::SET);
+        kv.data_unit = data_unit;
+        kv.payload = payload;
+        return kv;
+    };
+
+    // 0x0800: 3D position [x, y, z] as 3x float32
+    {
+        float pos[3] = {
+            static_cast<float>(msg->robot_odom_3d.pose.pose.position.x),
+            static_cast<float>(msg->robot_odom_3d.pose.pose.position.y),
+            static_cast<float>(msg->robot_odom_3d.pose.pose.position.z)
+        };
+        srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_POSITION,
+            static_cast<uint8_t>(e3::FLOAT32),
+            std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(pos),
+                                 reinterpret_cast<const uint8_t*>(pos) + 3)));
+    }
+
+    // 0x0801: Orientation quaternion [x, y, z, w] as 4x float32
+    {
+        float quat[4] = {
+            static_cast<float>(msg->robot_odom_3d.pose.pose.orientation.x),
+            static_cast<float>(msg->robot_odom_3d.pose.pose.orientation.y),
+            static_cast<float>(msg->robot_odom_3d.pose.pose.orientation.z),
+            static_cast<float>(msg->robot_odom_3d.pose.pose.orientation.w)
+        };
+        srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_ORIENTATION,
+            static_cast<uint8_t>(e3::FLOAT32),
+            std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(quat),
+                                 reinterpret_cast<const uint8_t*>(quat) + 4)));
+    }
+
+    // 0x0802: Battery percentage (uint8)
+    {
+        uint8_t val = msg->battery_percentage;
+        srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_BATTERY_PCT,
+            static_cast<uint8_t>(e3::BYTE), std::vector<uint8_t>{val}));
+    }
+
+    // 0x0803: GPS percentage (uint8, 0-100)
+    {
+        uint8_t val = static_cast<uint8_t>(msg->gps_percentage * 100.0f);
+        srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_GPS_PCT,
+            static_cast<uint8_t>(e3::BYTE), std::vector<uint8_t>{val}));
+    }
+
+    // 0x0804: Is charging (bool)
+    {
+        uint8_t val = msg->is_charging ? 1 : 0;
+        srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_IS_CHARGING,
+            static_cast<uint8_t>(e3::BOOL), std::vector<uint8_t>{val}));
+    }
+
+    // 0x0805: Emergency bitmask (uint32: HL << 16 | LL)
+    {
+        uint32_t em_bits = (static_cast<uint32_t>(msg->emergency_high_level) << 16) |
+                           static_cast<uint32_t>(msg->emergency_low_level);
+        srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_EMERGENCY,
+            static_cast<uint8_t>(e3::INT32),
+            std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(&em_bits),
+                                 reinterpret_cast<const uint8_t*>(&em_bits) + sizeof(em_bits))));
+    }
+
+    // 0x0806: Action progress (uint8)
+    {
+        uint8_t val = msg->current_action_progress;
+        srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_ACTION_PROGRESS,
+            static_cast<uint8_t>(e3::BYTE), std::vector<uint8_t>{val}));
+    }
+
+    // 0x0807: Current state (raw uint8)
+    {
+        uint8_t val = msg->state;
+        srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_CURRENT_STATE,
+            static_cast<uint8_t>(e3::BYTE), std::vector<uint8_t>{val}));
+    }
+
+    // 0x0808: Current job [area, path, pose_index] as 3x int16
+    {
+        int16_t job[3] = {msg->current_area, msg->current_path, msg->current_pose_index};
+        srv.request.kvs.push_back(make_kv(e3_telemetry::KEY_CURRENT_JOB,
+            static_cast<uint8_t>(e3::INT16),
+            std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(job),
+                                 reinterpret_cast<const uint8_t*>(job) + 3)));
+    }
+
+    if (!e3_schedule_client.call(srv)) {
+        ROS_WARN("[xbot_monitoring] Failed to schedule robot_state E3KV telemetry (%zu keys)",
+                 srv.request.kvs.size());
+    }
+}
+
 class MqttCallback : public mqtt::callback {
 
     void connected(const mqtt::string &string) override {
@@ -472,6 +588,7 @@ void robot_state_callback(const xbot_msgs::RobotState::ConstPtr &msg) {
 #endif
 
     try_publish_all("robot_state",j,false);
+    send_robot_state_telemetry(msg);
 }
 
 #ifdef SEND_VEL_COMD
