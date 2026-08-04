@@ -25,6 +25,7 @@
   <depend>grid_map_msgs</depend>
   <depend>dynamic_reconfigure</depend>
   <depend>mower_logic</depend>
+  <depend>e3_lib</depend>
 
   <!-- The export tag contains other, unspecified, tags -->
   <export>

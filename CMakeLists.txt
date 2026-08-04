@@ -17,6 +17,7 @@ find_package(catkin REQUIRED COMPONENTS
         grid_map_msgs
         dynamic_reconfigure
         mower_logic
+        e3_lib
         )
 
 
