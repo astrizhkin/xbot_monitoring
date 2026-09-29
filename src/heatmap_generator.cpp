@@ -28,11 +28,21 @@ bool has_map = false;
 
 bool save(const std::string &mapName, const std::string &sensor_id, grid_map::GridMap &gridMap) {
     ROS_INFO_STREAM("[heatmap_generator] Save heatmap "<<mapName<<" for sensor "<<sensor_id);
-    bool res = grid_map::GridMapRosConverter::saveToBag(gridMap,mapName + "_" + sensor_id + ".bag","gridmap");    
-    if(!res) {
-        ROS_ERROR("[heatmap_generator] Grid heatmap save error");
+    try {
+        bool res = grid_map::GridMapRosConverter::saveToBag(gridMap,mapName + "_" + sensor_id + ".bag","gridmap");    
+        if(!res) {
+            ROS_ERROR("[heatmap_generator] Grid heatmap save error");
+        }
+        return res;
+    } catch (const rosbag::BagException &e) {
+        // saveToBag does not guard I/O itself and throws on write errors (disk full, invalid path...);
+        // BagIOException/BagFormatException/BagUnindexedException all derive from rosbag::BagException
+        ROS_ERROR_STREAM("[heatmap_generator] Grid heatmap save exception for "<<mapName<<" sensor "<<sensor_id<<": "<<e.what());
+        return false;
+    } catch (const std::exception &e) {
+        ROS_ERROR_STREAM("[heatmap_generator] Grid heatmap save exception for "<<mapName<<" sensor "<<sensor_id<<": "<<e.what());
+        return false;
     }
-    return res;
     //rosbag::Bag bag;
     //ros::Time min_time = ros::TIME_MIN;
     //bag.open(mapName + "_" + sensor_id + ".bag", rosbag::bagmode::Write);
@@ -46,9 +56,20 @@ bool load(const std::string &mapName, const std::string &sensor_id,grid_map::Gri
         bool res = grid_map::GridMapRosConverter::loadFromBag(mapName + "_" + sensor_id + ".bag","gridmap",gridMap);
         if(!res) {
             ROS_ERROR("[heatmap_generator] Grid heatmap load error");
+            return false;
         }
-        return res;
-    } catch(rosbag::BagIOException &e) {
+        if(gridMap.getLayers().empty()){
+            // loadFromBag also returns true (with an empty map) if the bag exists but has no "gridmap" topic
+            ROS_ERROR_STREAM("[heatmap_generator] Grid heatmap load error: no gridmap data in bag for "<<mapName<<" sensor "<<sensor_id);
+            return false;
+        }
+        return true;
+    } catch(const rosbag::BagException &e) {
+        // Catch the base class: a corrupt/truncated bag throws BagFormatException/BagUnindexedException etc., not BagIOException
+        ROS_ERROR_STREAM("[heatmap_generator] Grid heatmap load exception for "<<mapName<<" sensor "<<sensor_id<<": "<<e.what());
+        return false;
+    } catch(const std::exception &e) {
+        ROS_ERROR_STREAM("[heatmap_generator] Grid heatmap load exception for "<<mapName<<" sensor "<<sensor_id<<": "<<e.what());
         return false;
     }
 
@@ -71,27 +92,33 @@ void onMap(const xbot_msgs::Map &mapInfo) {
                    lastMap.name != mapInfo.name) {
         ROS_INFO("[heatmap_generator] Updated heatmap geometry.");
         for(auto & [key,value] : pubsub_map) {
-            grid_map::GridMap &sensorMap = std::get<0>(value);
-            double resolution = std::get<3>(value);
-            sensorMap.setGeometry(grid_map::Length(mapInfo.mapWidth, mapInfo.mapHeight), resolution,
-                                        grid_map::Position(mapInfo.mapCenterX, mapInfo.mapCenterY));
-            grid_map::GridMap loadMap;
-            if(load(mapInfo.name, key, loadMap)){
-                ROS_INFO_STREAM("[heatmap_generator] Copying "<<(int)loadMap.getLayers().size()<<" layers from loaded heatmap "<<mapInfo.name<<" sensor "<<key);
-                for (grid_map::GridMapIterator iterator(loadMap); !iterator.isPastEnd(); ++iterator) {
-                    const grid_map::Index index(*iterator);
-                    grid_map::Position indexPos;
-                    loadMap.getPosition(index, indexPos);
-                    for(auto &layerName : loadMap.getLayers()){
-                        float val = loadMap.at(layerName, index);
-                        if(!isnan(val)){
-                            //ROS_INFO_STREAM("[heatmap_generator] Copy from loaded map "<<mapInfo.name<<" sensor "<<key<<" layer "<<layerName<<" at pos "<<indexPos.x()<<","<<indexPos.y()<<" value "<<val);
-                            sensorMap.atPosition(layerName, indexPos) = val;
+            try {
+                grid_map::GridMap &sensorMap = std::get<0>(value);
+                double resolution = std::get<3>(value);
+                sensorMap.setGeometry(grid_map::Length(mapInfo.mapWidth, mapInfo.mapHeight), resolution,
+                                            grid_map::Position(mapInfo.mapCenterX, mapInfo.mapCenterY));
+                grid_map::GridMap loadMap;
+                if(load(mapInfo.name, key, loadMap)){
+                    ROS_INFO_STREAM("[heatmap_generator] Copying "<<(int)loadMap.getLayers().size()<<" layers from loaded heatmap "<<mapInfo.name<<" sensor "<<key);
+                    for (grid_map::GridMapIterator iterator(loadMap); !iterator.isPastEnd(); ++iterator) {
+                        const grid_map::Index index(*iterator);
+                        grid_map::Position indexPos;
+                        loadMap.getPosition(index, indexPos);
+                        for(auto &layerName : loadMap.getLayers()){
+                            float val = loadMap.at(layerName, index);
+                            if(!isnan(val)){
+                                //ROS_INFO_STREAM("[heatmap_generator] Copy from loaded map "<<mapInfo.name<<" sensor "<<key<<" layer "<<layerName<<" at pos "<<indexPos.x()<<","<<indexPos.y()<<" value "<<val);
+                                sensorMap.atPosition(layerName, indexPos) = val;
+                            }
                         }
                     }
+                } else {
+                    ROS_WARN_STREAM("[heatmap_generator] Unable to load heatmap "<<mapInfo.name<<" sensor "<<key);
                 }
-            } else {
-                ROS_WARN_STREAM("[heatmap_generator] Unable to load heatmap "<<mapInfo.name<<" sensor "<<key);
+            } catch(const std::exception &e) {
+                // atPosition/getPosition throw on out-of-range positions (shrunk/moved map) or missing layers;
+                // an exception escaping a ROS callback calls std::terminate, so catch and skip this sensor here
+                ROS_ERROR_STREAM("[heatmap_generator] Could not update heatmap geometry for "<<mapInfo.name<<" sensor "<<key<<": "<<e.what());
             }
         }
         has_map = true;
@@ -168,7 +195,12 @@ int main(int argc, char **argv) {
         auto eq_pos = entry.find('=');
         if(eq_pos != std::string::npos) {
             sensor_id = entry.substr(0, eq_pos);
-            resolution = std::stod(entry.substr(eq_pos + 1));
+            try {
+                resolution = std::stod(entry.substr(eq_pos + 1));
+            } catch(const std::exception &e) {
+                ROS_ERROR_STREAM("[heatmap_generator] Invalid resolution in sensor_ids entry '"<<entry<<"', skipping: "<<e.what());
+                continue;
+            }
         }
 
         ROS_INFO_STREAM("[heatmap_generator] Generating heatmap for sensor " << sensor_id
